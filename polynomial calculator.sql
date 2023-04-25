@@ -691,3 +691,5 @@ EXCEPTION
     WHEN OTHERS THEN
         dbms_output.put_line('Ничего не работает и не будет работать!!!');
 END;
+
+
