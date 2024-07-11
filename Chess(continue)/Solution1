@@ -1,0 +1,209 @@
+--Запрос построен следующим образом: при помощи рекурсии каждый ход визуализация поля перерисовывается. Начальное положение
+--поля задано с помощью одного из подзапросов, и каждый ход на основе предыдущего положения поля создается новое.
+--Первый рекурсивный подзапрос moves обрабатывает начальную строку, поданную на вход, и с помощью функции split_part через
+--пробелы разделяет ее на подстроки, каждая из которых в дальнейшем считается отдельным ходом.
+WITH RECURSIVE moves AS
+    (SELECT 1::numeric AS move_number, split_part(current_setting('chess.game'), ' ', 2) AS MOVE
+    UNION ALL 
+    --Рокировка обрабатывается отдельно, поскольку для рокировки требуется создать две записи о совершении хода.
+    --Соответственно, при рокировке создается дополнительная строка с модифицированным номером хода, а сам ход
+    --маркируется по-разному в зависимости от того, является рокировка короткой или длинной (это необходимо
+    --для дальнейшей обработки).
+    SELECT CASE WHEN split_part(current_setting('chess.game'), ' ', ROUND(move_number + 1.5)::integer) LIKE 'O%O' 
+    THEN move_number + 0.5
+        ELSE move_number + 1 END,
+    CASE WHEN split_part(current_setting('chess.game'), ' ', ROUND(move_number + 1.5)::integer) LIKE 'O-O' 
+    THEN CASE WHEN (move_number * 2) % 2 = 0 THEN 'O12' ELSE 'O21' END
+        WHEN split_part(current_setting('chess.game'), ' ', ROUND(move_number + 1.5)::integer) LIKE 'O-O-O' 
+    THEN CASE WHEN (move_number * 2) % 2 = 0 THEN 'O13' ELSE 'O31' END
+        ELSE split_part(current_setting('chess.game'), ' ', (move_number + 2)::integer) END
+    FROM moves 
+    --Ограничение, позволяющее завершить рекурсию и не создать при этом лишних записей.
+    WHERE move_number < (LENGTH(current_setting('chess.game')) - LENGTH(REPLACE(current_setting('chess.game'), ' ', ''))) 
+),
+
+--Второй подзапрос moves_2 обрабатывает каждую часть исходной строки, как отдельный ход, и записывает все данные
+--о нем (номер, фигура, цвет, откуда и куда). Это необходимо для точности и простоты дальнейшей работы с полем.
+moves_2 AS
+    (SELECT move_number, MOVE, CASE WHEN (move_num % 2) = 1 THEN 'w' ELSE 'b' END AS color, 
+    --Если у фигуры записан ее тип, то этот тип ей присваивается (в том числе при повышении "уровня" пешки);
+    --если происходит рокировка, то тип фигуры определяется в зависимости от номера хода;
+    --если тип фигуры не указан и она дошла до последней горизонтали, то она автоматически становится ферзем;
+    --если все эти условия не выполнены, то фигура считается пешкой.
+    CASE WHEN regexp_like(MOVE, '[RNBQK]') THEN regexp_substr(MOVE, '[RNBQK]')
+        WHEN MOVE LIKE 'O1%' THEN 'K'
+        WHEN MOVE LIKE 'O%1' THEN 'R'
+        WHEN (move_num % 2) = 1 AND regexp_like(MOVE, '8') THEN 'Q'
+        WHEN (move_num % 2) = 0 AND regexp_like(MOVE, '1') THEN 'Q'
+        ELSE 'P' END AS figure,
+    --При рокировке клетки, откуда/куда происходит движение, определяются вручную в зависимости от типа рокировки;
+    --во всех остальных случаях клетки начала и конца хода берутся напрямую из его записи.
+    CASE WHEN MOVE LIKE 'O1%' THEN CASE WHEN (move_num % 2) = 1 THEN 'e1' ELSE 'e8' END
+        WHEN MOVE LIKE 'O2%' THEN CASE WHEN (move_num % 2) = 1 THEN 'h1' ELSE 'h8' END
+        WHEN MOVE LIKE 'O3%' THEN CASE WHEN (move_num % 2) = 1 THEN 'a1' ELSE 'a8' END
+        WHEN regexp_instr(MOVE, '[a-h]\d', 1, 2) = 0 THEN NULLIF(regexp_replace(SUBSTRING(MOVE FROM (regexp_instr(MOVE, '[RNBQK]') + 1) 
+            FOR (regexp_instr(MOVE, '[a-h]\d') - 1 - regexp_instr(MOVE, '[RNBQK]'))), '[^a-h\d]', ''), '')
+        ELSE regexp_substr(MOVE, '[a-h]\d', 1, 1) END AS m_from,
+    CASE WHEN MOVE LIKE 'O21' THEN CASE WHEN (move_num % 2) = 1 THEN 'f1' ELSE 'f8' END
+        WHEN MOVE LIKE 'O31' THEN CASE WHEN (move_num % 2) = 1 THEN 'd1' ELSE 'd8' END
+        WHEN MOVE LIKE 'O12' THEN CASE WHEN (move_num % 2) = 1 THEN 'g1' ELSE 'g8' END
+        WHEN MOVE LIKE 'O13' THEN CASE WHEN (move_num % 2) = 1 THEN 'c1' ELSE 'c8' END
+        ELSE COALESCE(regexp_substr(MOVE, '[a-h]\d', 1, 2), regexp_substr(MOVE, '[a-h]\d', 1, 1)) END AS m_to,
+    CASE WHEN MOVE LIKE 'O21' THEN 'f' WHEN MOVE LIKE 'O31' THEN 'd'
+        WHEN MOVE LIKE 'O12' THEN 'g' WHEN MOVE LIKE 'O13' THEN 'c'
+        ELSE SUBSTRING(COALESCE(regexp_substr(MOVE, '[a-h]\d', 1, 2), regexp_substr(MOVE, '[a-h]\d', 1, 1)), 1, 1) END AS m_line_to,
+    CASE WHEN MOVE LIKE 'O..' THEN CASE WHEN (move_num % 2) = 1 THEN 1 ELSE 8 END
+        ELSE SUBSTRING(COALESCE(regexp_substr(MOVE, '[a-h]\d', 1, 2), regexp_substr(MOVE, '[a-h]\d', 1, 1)), 2, 1)::integer END AS m_num_to,
+    CASE WHEN regexp_like(MOVE, 'x') THEN true ELSE false END AS kills
+    FROM (SELECT MOVE, ROW_NUMBER() OVER (ORDER BY move_number) AS move_number,
+        ROW_NUMBER() OVER (ORDER BY move_number) - 
+        (COUNT(MOVE) FILTER (WHERE MOVE LIKE 'O%') OVER (ORDER BY move_number)) / 2 AS move_num
+            FROM moves WHERE MOVE NOT LIKE '%.%')
+),
+
+--Третий подзапрос board формирует начальное положение поля.
+board AS
+    (SELECT 8 AS LINE, 'rnbqkbnr' AS chess
+    UNION ALL SELECT 7, 'pppppppp'
+    UNION ALL SELECT 6, ' . . . .'
+    UNION ALL SELECT 5, '. . . . '
+    UNION ALL SELECT 4, ' . . . .'
+    UNION ALL SELECT 3, '. . . . '
+    UNION ALL SELECT 2, 'PPPPPPPP'
+    UNION ALL SELECT 1, 'RNBQKBNR'
+), 
+
+--Четвертый подзапрос potent_moves формирует для каждого хода строку с потенциальными клетками, откуда этот 
+--ход мог начаться (это необходимо ввиду того, что мы не знаем точно, какая именно фигура ходила, и нам 
+--необходимо выяснить это, основываясь на текущем состоянии доски, типе фигуры и конечной клетке).
+potent_moves AS 
+(
+    SELECT move_number, MOVE, color, figure, m_from, m_to,
+    --Если в записи хода изначально указана клетка, то ее мы и используем.
+    CASE WHEN LENGTH(m_from) = 2 THEN m_from
+        --Если это пешка и она не бьет никого, то она может идти только прямо. Соответственно, потенциальные 
+        --клетки начала хода - одна или две клетки на той же вертикали до нее.
+        WHEN figure = 'P' AND color = 'w' AND kills = false THEN m_line_to || (m_num_to - 1)
+            || CASE WHEN m_num_to = 4 THEN ' ' || m_line_to || '2' ELSE '' END
+        WHEN figure = 'P' AND color = 'b' AND kills = false THEN m_line_to || (m_num_to + 1)
+            || CASE WHEN m_num_to = 5 THEN ' ' || m_line_to || '7' ELSE '' END 
+        --Если это пешка и она бьет, то у нее в нотации априори указана вертикаль. Используем ее и добавим номер линии
+        --на единицу меньше конечного.
+        WHEN figure = 'P' AND color = 'w' AND kills THEN m_from || (m_num_to - 1)
+        WHEN figure = 'P' AND color = 'b' AND kills THEN m_from || (m_num_to + 1)
+        --Если это конь, то у него есть восемь потенциальных клеток, откуда он мог прийти. Запишем их, основываясь на 
+        --их положении относительно конечной клетки, с помощью регулярного выражения отсеем выходящие за пределы поля.
+        WHEN figure = 'N' THEN regexp_replace(regexp_replace(regexp_replace(
+            CHR(ASCII(m_to) - 2) || (m_num_to + 1) || ' ' || CHR(ASCII(m_to) - 2) || (m_num_to - 1) || ' ' || 
+            CHR(ASCII(m_to) - 1) || (m_num_to + 2) || ' ' || CHR(ASCII(m_to) - 1) || (m_num_to - 2) || ' ' ||
+            CHR(ASCII(m_to) + 1) || (m_num_to + 2) || ' ' || CHR(ASCII(m_to) + 1) || (m_num_to - 2) || ' ' ||
+            CHR(ASCII(m_to) + 2) || (m_num_to + 1) || ' ' || CHR(ASCII(m_to) + 2) || (m_num_to - 1) || ' ',
+            '(.[-\d]\d )', '', 1, 0), '(.[^(1-8)] |[^(a-h)]. )', '', 1, 0), CASE WHEN LENGTH(m_from) > 0 
+                THEN '[^' || SUBSTRING(m_from, 1, 1) || '][^' || SUBSTRING(m_from, 1, 1) || '] ' ELSE '' END, '', 1, 0)
+        --Если это слон, то он ходит строго по диагонали. Запишем все клетки по диагонали от конечной, с помощью 
+        --регулярного выражения отсеем выходящие за пределы поля, а также саму конечную клетку.
+        WHEN figure = 'B' THEN regexp_replace(regexp_replace(regexp_replace(regexp_replace(
+            ' a' || (m_num_to - ASCII(m_to) + ASCII('a')) || ' a' || (m_num_to + ASCII(m_to) - ASCII('a')) ||
+            ' b' || (m_num_to - ASCII(m_to) + ASCII('b')) || ' b' || (m_num_to + ASCII(m_to) - ASCII('b')) ||
+            ' c' || (m_num_to - ASCII(m_to) + ASCII('c')) || ' c' || (m_num_to + ASCII(m_to) - ASCII('c')) ||
+            ' d' || (m_num_to - ASCII(m_to) + ASCII('d')) || ' d' || (m_num_to + ASCII(m_to) - ASCII('d')) ||
+            ' e' || (m_num_to - ASCII(m_to) + ASCII('e')) || ' e' || (m_num_to + ASCII(m_to) - ASCII('e')) ||
+            ' f' || (m_num_to - ASCII(m_to) + ASCII('f')) || ' f' || (m_num_to + ASCII(m_to) - ASCII('f')) ||
+            ' g' || (m_num_to - ASCII(m_to) + ASCII('g')) || ' g' || (m_num_to + ASCII(m_to) - ASCII('g')) ||
+            ' h' || (m_num_to - ASCII(m_to) + ASCII('h')) || ' h' || (m_num_to + ASCII(m_to) - ASCII('h')) || ' ',
+            '(.[-\d]\d )', '', 1, 0), '(.[^(1-8)] |[^(a-h)]. )', '', 1, 0), m_to || ' ', '', 1, 0), CASE WHEN LENGTH(m_from) > 0 
+                THEN '[^' || SUBSTRING(m_from, 1, 1) || '][^' || SUBSTRING(m_from, 1, 1) || '] ' ELSE '' END, '', 1, 0)
+        --Если это ладья, то она ходит строго по прямой. Запишем все клетки по прямой от конечной, с помощью 
+        --регулярного выражения отсеем саму конечную клетку.
+        WHEN figure = 'R' THEN regexp_replace(regexp_replace(
+            ' a' || m_num_to || ' b' || m_num_to || ' c' || m_num_to || ' d' || m_num_to ||
+            ' e' || m_num_to || ' f' || m_num_to || ' g' || m_num_to || ' h' || m_num_to || ' ' ||
+            m_line_to || '1 ' || m_line_to || '2 ' || m_line_to || '3 ' || m_line_to || '4 ' ||
+            m_line_to || '5 ' || m_line_to || '6 ' || m_line_to || '7 ' || m_line_to || '8 ',
+            m_to || ' ', '', 1, 0), CASE WHEN LENGTH(m_from) > 0 
+                THEN '[^' || SUBSTRING(m_from, 1, 1) || '][^' || SUBSTRING(m_from, 1, 1) || '] ' ELSE '' END, '', 1, 0)
+        --Если это ферзь, то он ходит и по диагонали, и по прямой. Объединим клетки для слона и ладьи, с помощью 
+        --регулярного выражения отсеем выходящие за пределы поля и саму конечную клетку.
+        WHEN figure = 'Q' THEN regexp_replace(regexp_replace(regexp_replace(regexp_replace(
+            ' a' || (m_num_to - ASCII(m_to) + ASCII('a')) || ' a' || (m_num_to + ASCII(m_to) - ASCII('a')) ||
+            ' b' || (m_num_to - ASCII(m_to) + ASCII('b')) || ' b' || (m_num_to + ASCII(m_to) - ASCII('b')) ||
+            ' c' || (m_num_to - ASCII(m_to) + ASCII('c')) || ' c' || (m_num_to + ASCII(m_to) - ASCII('c')) ||
+            ' d' || (m_num_to - ASCII(m_to) + ASCII('d')) || ' d' || (m_num_to + ASCII(m_to) - ASCII('d')) ||
+            ' e' || (m_num_to - ASCII(m_to) + ASCII('e')) || ' e' || (m_num_to + ASCII(m_to) - ASCII('e')) ||
+            ' f' || (m_num_to - ASCII(m_to) + ASCII('f')) || ' f' || (m_num_to + ASCII(m_to) - ASCII('f')) ||
+            ' g' || (m_num_to - ASCII(m_to) + ASCII('g')) || ' g' || (m_num_to + ASCII(m_to) - ASCII('g')) ||
+            ' h' || (m_num_to - ASCII(m_to) + ASCII('h')) || ' h' || (m_num_to + ASCII(m_to) - ASCII('h')) ||
+            ' a' || m_num_to || ' b' || m_num_to || ' c' || m_num_to || ' d' || m_num_to ||
+            ' e' || m_num_to || ' f' || m_num_to || ' g' || m_num_to || ' h' || m_num_to || ' ' ||
+            m_line_to || '1 ' || m_line_to || '2 ' || m_line_to || '3 ' || m_line_to || '4 ' ||
+            m_line_to || '5 ' || m_line_to || '6 ' || m_line_to || '7 ' || m_line_to || '8 ',
+            '(.[-\d]\d )', '', 1, 0), '(.[^(1-8)] |[^(a-h)]. )', '', 1, 0), m_to || ' ', '', 1, 0), CASE WHEN LENGTH(m_from) > 0 
+                THEN '[^' || SUBSTRING(m_from, 1, 1) || '][^' || SUBSTRING(m_from, 1, 1) || '] ' ELSE '' END, '', 1, 0)
+        ELSE null
+    END AS pot_moves
+    FROM moves_2
+),
+
+--Пятый рекурсивный подзапрос after_move_board обращается к положению поля на предыдущем ходу (в первой итерации
+--он обращается к board, во всех последующих к себе самому) и, основываясь на номере хода, меняет конфигурацию конкретных
+--строк.
+after_move_board AS
+    (SELECT 0 AS move_n, LINE, chess, 'a8' AS p_old, true AS real_m, 0::bigint AS flag_1
+    FROM board
+    UNION ALL SELECT move_n + 1 AS move_n, LINE,
+    CASE WHEN move_n + 1 = move_number THEN 
+        --Если ход происходит в пределах одной горизонтали, то модифицируется всего одна строка с помощью
+        --двух OVERLAY.
+        CASE WHEN LINE = SUBSTRING(pot_move, 2, 1)::integer AND LINE = SUBSTRING(m_to, 2, 1)::integer 
+        THEN OVERLAY(OVERLAY(chess PLACING (CASE 
+            WHEN color = 'w' THEN UPPER(figure) ELSE LOWER(figure) END)
+                FROM (ASCII(m_to) - 96)) PLACING (CASE
+            WHEN (LINE + ASCII(pot_move)) % 2 = 0 
+            THEN '.' ELSE ' ' END)
+            FROM (ASCII(pot_move) - 96)) 
+        --Если горизонталь является той, откуда производится ход, то на месте фигуры записывается пустое поле правильного цвета.
+        WHEN LINE = SUBSTRING(pot_move, 2, 1)::integer 
+        THEN OVERLAY(chess PLACING (CASE
+            WHEN (LINE + ASCII(pot_move)) % 2 = 0 
+            THEN '.' ELSE ' ' END) FROM (ASCII(pot_move) - 96)) 
+        --Если горизонталь является той, куда производится ход, то на месте нужного поля записывается фигура правильного цвета.
+        WHEN LINE = SUBSTRING(m_to, 2, 1)::integer 
+        THEN OVERLAY(chess PLACING (CASE
+            WHEN color = 'w' THEN UPPER(figure) ELSE LOWER(figure) END) FROM (ASCII(m_to) - 96)) 
+        --Если горизонталь не соответствует тем, что указаны в записи хода, то строка не меняется.
+        ELSE chess END
+    --Проведем проверку корректности потенциальной клетки, откуда мог начаться ход, основываясь на текущем состоянии 
+    --строки: проверим, наличествует ли в этой клетке фигура нужного типа и цвета.
+    END AS chess, pot_move, (CASE WHEN LENGTH(m_from) = 2 OR NOT regexp_like(pot_moves, line::text) THEN true ELSE CASE 
+            WHEN line = SUBSTRING(pot_move, 2, 1)::integer AND SUBSTRING(chess, ASCII(pot_move) - 96, 1) 
+                = (CASE WHEN color = 'b' THEN LOWER(figure) ELSE figure END)
+            THEN true
+            WHEN line <> SUBSTRING(pot_move, 2, 1)::integer AND SUBSTRING(chess, ASCII(pot_move) - 96, 1) 
+                <> (CASE WHEN color = 'b' THEN LOWER(figure) ELSE figure END)
+            THEN true
+            ELSE false END
+        END) AS real_m,
+    --Поставим флаг, показывающий, нашли мы нужную нам клетку или не нашли.
+    SUM(CASE WHEN LENGTH(m_from) = 2 OR NOT regexp_like(pot_moves, line::text) THEN 0 ELSE CASE 
+            WHEN line = SUBSTRING(pot_move, 2, 1)::integer AND SUBSTRING(chess, ASCII(pot_move) - 96, 1) 
+                = (CASE WHEN color = 'b' THEN LOWER(figure) ELSE figure END)
+            THEN 1 ELSE 0 END
+        END) OVER (PARTITION BY move_n, line ORDER BY NULLIF(SUBSTRING(pot_move, 2, 1)::integer, line) DESC NULLS FIRST, 
+		SUBSTRING(pot_move, 1, 1) ASC)
+    FROM after_move_board JOIN 
+        (SELECT move_number, color, figure, m_to, m_from, pot_moves, regexp_split_to_table(TRIM(pot_moves, ' '), ' ') AS pot_move
+            FROM potent_moves)
+        AS potent_moves ON move_n + 1 = move_number
+    --Поставим проверку, отсеивающую лишние строки на основе проверки корректности "клетки выхода" и флага.
+    WHERE move_n < (SELECT MAX(move_number) FROM moves_2) AND real_m = true AND 
+        (CASE WHEN line = SUBSTRING(p_old, 2, 1)::integer AND flag_1 <> 0 THEN TRUE
+            WHEN flag_1 <> 0 THEN FALSE ELSE real_m END) = TRUE
+) 
+
+--Основной запрос получает из after_move_board состояние поля на момент последнего хода.
+SELECT DISTINCT LINE, chess
+FROM after_move_board
+WHERE move_n = (SELECT MAX(move_number) FROM moves_2) AND real_m = true AND 
+        (CASE WHEN line = SUBSTRING(p_old, 2, 1)::integer AND flag_1 <> 0 THEN TRUE
+            WHEN flag_1 <> 0 THEN FALSE ELSE real_m END) = TRUE
+ORDER BY LINE DESC;
