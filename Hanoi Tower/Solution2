@@ -1,0 +1,33 @@
+/* Решение основывается на хранение "стека" каждой башни. 
+Из любой башни перекладывается самый верхний (последний, маленький) элемент */
+create table if not exists rods (
+    rod_id integer primary key,
+    disks INTEGER[]
+);
+-- начальное состояние - все 64 диска на первом стержне
+insert into rods (
+  select 1, array(select * from generate_series(1, 64))
+   union
+  select *, null from generate_series(2, 64)
+);
+
+create function move (rod_from integer, rod_to integer)
+       returns integer
+as $$
+  lock table rods in exclusive mode;
+  -- ошибка, когда rod_from/rod_to некорректны или переносим с пустой башни
+  select 1 / case when coalesce((select disks from rods where rod_id=rod_from)[1], 65)
+                    >= coalesce((select disks from rods where rod_id=rod_to)[1], 64)
+                    or rod_to not between 1 and 64
+                  then 0 else 1 end;
+  -- на вершину стека новой башни переносим вершину предыдущей башни
+  update rods
+     set disks = (select disks from rods where rod_id=rod_from)[1:1] ||
+                 (select disks from rods where rod_id=rod_to)
+   where rod_id = rod_to;
+   -- убираем верхний элемент стека текущей башни
+   update rods
+     set disks = (select disks from rods where rod_id=rod_from)[2:64]
+   where rod_id = rod_from;
+  select disks[1] from rods where rod_id = rod_to;
+$$ language sql;
