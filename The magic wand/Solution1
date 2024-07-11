@@ -1,0 +1,61 @@
+WITH flag_deeds as (select ts,
+                           good,
+                           case 
+                             when lag(good) OVER (order by ts) != good 
+                               then 1 -- ставим флаг, если предыдущее дело отличается от текущего
+                             else 0 end as reset_flag
+           from deeds
+),
+group_deeds AS (select ts, 
+                       good,
+                       SUM(reset_flag) OVER (order by ts) as group_id  -- группируем подряд идущие хорошие или плохие дела
+                from flag_deeds),
+ordered_deeds as (select ts,
+               good,
+               group_id,
+               row_number() over (partition by group_id) rn, -- порядок дела по времени
+               5 as need_deeds  -- начальное количество дел, необходимых для получения палочки
+        from group_deeds),
+take_deeds as (select *,
+                case 
+                  when rn = 5 and good = false and -- моменты, когда палочка должна забираться
+                  (select good 
+                   from ordered_deeds 
+                   where rn = 5 and ts<b.ts -- предыдущий момент, когда было 5 подряд одинаковых дел, это добрые дела - true
+                   order by ts desc limit 1) then 1 else 0 end as take -- нужно ли сейчас забирать палочку
+         from (select * 
+               from ordered_deeds 
+               where group_id >= (select group_id 
+                                  from ordered_deeds 
+                                  where good = true and rn = 5 limit 1  -- выбираем все группы кроме первой, так как у первой группы нет предыдущей группы с 5 делами подряд
+                                 )
+              ) as b
+),
+mod_need_deeds as (select *,
+                          sum(take) over(rows between unbounded preceding and current row) -- подсчёт всех забираний палочек
+                          + need_deeds as m_need_deeds -- вместе с необходимыми начальными 5 делами даёт текущее необходимое количество
+                   from take_deeds
+),
+times as (select case 
+                  when m_need_deeds = rn and good = true -- когда необходимое количество добрых дел совпадают с текущим
+                       and 
+                       (
+                        (select not good from ordered_deeds where rn = m_need_deeds and ts<mnd.ts or take = 1 order by ts desc limit 1) or --когда предыдущее изменение палочки это забирание, а текущее - выдача 
+                        (select not good from ordered_deeds where ts<mnd.ts and rn = 5 and group_id != mnd.group_id order by ts desc limit 1) or --когда rn больше 5 в группе добрых дел, чтобы пропустить эту строку
+                        (select count(good) from ordered_deeds where rn = m_need_deeds and ts<mnd.ts) = 0 -- для выдачи палочки в первый раз
+                       )
+                       or take = 1 -- когда палочка отбирается
+                  then ts end as time -- берём время
+          from mod_need_deeds mnd
+),
+not_empty_times as (select * 
+                    from times 
+                    where time is not null
+),
+ordered_times AS (select time, row_number() over() AS row_num from not_empty_times
+                  union
+                  select null::timestamp,(select count(*)+1 from not_empty_times)) -- если число времен нечетное, для незавершённого периода
+select tsrange(r1.time,r2.time) as range -- объединяем ближайшие два времени в один интервал
+from ordered_times r1 
+join ordered_times r2 ON r1.row_num + 1 = r2.row_num -- соединение на ближайших строках
+where r1.row_num % 2 = 1 order by 1;
