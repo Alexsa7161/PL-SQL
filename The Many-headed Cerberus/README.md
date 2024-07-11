@@ -4,8 +4,10 @@
 <br>Выведите интервалы времени, в которые Гарри и его друзья могли бы пробраться мимо пса.
 <br>События фиксируются в таблице cerberus:
 <br>CREATE TABLE cerberus(
-<br>head_id integer NOT NULL,	-- номер головы event_time timestamp NOT NULL, -- время события
-<br>head_state boolean NOT NULL,	-- true - бодрствует, false - спит UNIQUE (head_id, event_time)
+<br>head_id integer NOT NULL,	-- номер головы 
+<br>event_time timestamp NOT NULL, -- время события
+<br>head_state boolean NOT NULL,	-- true - бодрствует, false - спит 
+<br>UNIQUE (head_id, event_time)
 <br>);
 <br>Запрос должен вывести интервалы (в пределах времени наблюдения), в которые все головы спали.
 <h2>Пример</h2>
@@ -18,7 +20,6 @@
 <br>(1,	'2024-04-01	04:30:00'::timestamp,	false),	--	1-я	спит
 <br>(1,	'2024-04-01	05:00:00'::timestamp,	true),	--	1-я	проснулась
 <br>(3,	'2024-04-01	06:00:00'::timestamp,	true);	--	3-я	проснулась
-<br>
 <br>запрос должен вывести:
 <br>time_from	|	time_to
 <br>---------------------+-------------------- 2024-04-01 03:00:00 | 2024-04-01 04:00:00
