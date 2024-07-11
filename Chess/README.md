@@ -45,5 +45,4 @@
 <br>2 | PPPP PPP
 <br>1 | RNB K NR (8 rows)
 <br>Это соответствует следующей позиции:
-![Пример](https://github.com/Alexsa7161/PL-SQL/blob/main/Chess/image.png)
 <img src="https://github.com/Alexsa7161/PL-SQL/blob/main/Chess/image.png">
