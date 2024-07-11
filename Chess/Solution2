@@ -1,0 +1,98 @@
+-- Решение строится на обновлении игрового поля после каждого хода
+-- убираем из данных: порядковый номер хода, х(убийство), +(шах), #(мат) для упрощения парсинга
+WITH RECURSIVE input as (
+  SELECT regexp_replace((select current_setting('chess.game')), '\d+\. |[x+#]', '', 'g') AS data
+)
+-- обновление игровой доски после каждого шага
+,moves as (
+  select 0 as move_number
+       -- массив ходов
+       , string_to_array((select data from input), ' ') as moves_array
+       -- игровое поле
+       , '{"a1" : "R", "a2" : "P", "a3" : " ", "a4" : " ", "a5" : " ", "a6" : " ", "a7" : "p", "a8" : "r"
+          ,"b1" : "N", "b2" : "P", "b3" : " ", "b4" : " ", "b5" : " ", "b6" : " ", "b7" : "p", "b8" : "n"
+          ,"c1" : "B", "c2" : "P", "c3" : " ", "c4" : " ", "c5" : " ", "c6" : " ", "c7" : "p", "c8" : "b"
+          ,"d1" : "Q", "d2" : "P", "d3" : " ", "d4" : " ", "d5" : " ", "d6" : " ", "d7" : "p", "d8" : "q"
+          ,"e1" : "K", "e2" : "P", "e3" : " ", "e4" : " ", "e5" : " ", "e6" : " ", "e7" : "p", "e8" : "k"
+          ,"f1" : "B", "f2" : "P", "f3" : " ", "f4" : " ", "f5" : " ", "f6" : " ", "f7" : "p", "f8" : "b"
+          ,"g1" : "N", "g2" : "P", "g3" : " ", "g4" : " ", "g5" : " ", "g6" : " ", "g7" : "p", "g8" : "n"
+          ,"h1" : "R", "h2" : "P", "h3" : " ", "h4" : " ", "h5" : " ", "h6" : " ", "h7" : "p", "h8" : "r"
+        }'::jsonb as chessboard
+  union ALL
+  select move_number + 1
+       -- оставшиеся шаги в партии
+       , moves_array[2:array_length(moves_array, 1)] AS moves_array
+       -- обновляем игровое поле. короткая рокировка
+       , case when moves_array[1] = 'O-O'
+              -- если ходит первый игрок
+              then case when mod(move_number+1, 2) = 1
+                        then chessboard || 
+                             '{"e1": " "}'::jsonb ||
+                             '{"h1": " "}'::jsonb || 
+                             '{"g1": "K"}'::jsonb || 
+                             '{"f1": "R"}'::jsonb
+                        else chessboard || 
+                             '{"e8": " "}'::jsonb || 
+                             '{"h8": " "}'::jsonb || 
+                             '{"g8": "k"}'::jsonb || 
+                             '{"f8": "r"}'::jsonb end
+              -- длинная рокировка
+              else case when moves_array[1] = 'O-O-O' 
+                   then case when mod(move_number+1, 2) = 1 
+                        then chessboard || 
+                             '{"e1": " "}'::jsonb || 
+                             '{"a1": " "}'::jsonb || 
+                             '{"c1": "K"}'::jsonb || 
+                             '{"d1": "R"}'::jsonb
+                        else chessboard || 
+                             '{"e8": " "}'::jsonb || 
+                             '{"a8": " "}'::jsonb || 
+                             '{"c8": "k"}'::jsonb || 
+                             '{"d8": "r"}'::jsonb end
+       -- если не рокировка
+       else chessboard ||
+         -- убираем фигуру из начальной позиции
+         ('{"' || (regexp_match(moves_array[1], '([a-h][1-8])'))[1] || '": " "}')::jsonb ||
+         -- ставим фигуру на конечную позицию
+         ('{"' || (regexp_match(moves_array[1], '[a-h][1-8].*?([a-h][1-8])'))[1] || '": "'||
+         case when mod(move_number+1, 2) = 1
+              -- шаг длины 5 = или ход НЕ пешки, или явное превращение пешки
+              then upper(case when length(moves_array[1]) = 5 
+                              then case when substring(moves_array[1], 1, 1) in ('N', 'B', 'R', 'Q', 'K')
+                                        then substring(moves_array[1], 1, 1)
+                                        else substring(moves_array[1], 5, 1) end
+                              -- иначе или неявное превращение пешки
+                              else case when substring(moves_array[1], 4, 1) in ('1', '8') 
+                                        then 'Q'
+                              -- иначе ход пешки
+                                        else 'P' end
+                          end)
+              else lower(case when length(moves_array[1]) = 5 
+                              then case when substring(moves_array[1], 1, 1) in ('N', 'B', 'R', 'Q', 'K')
+                                        then substring(moves_array[1], 1, 1)
+                                        else substring(moves_array[1], 5, 1) end
+                              else case when substring(moves_array[1], 4, 1) in ('1', '8') 
+                                        then 'Q'
+                                        else 'P' end
+                          end) end                                       
+         ||'"}')::jsonb end end
+  FROM moves
+  WHERE move_number < array_length(string_to_array((select data from input), ' '), 1)
+)
+-- разбиваем jsonb на столбцы и строки для отображения игрового поля
+, cells_data as (
+select (regexp_match(key, '\d'))[1]::int as line
+     , row_number() over(partition by (regexp_match(key, '\d'))[1] order by key) as col
+     , key
+     , value
+  -- берем игровую доску с последнего хода
+  from jsonb_each_text((select chessboard
+                          from moves
+                         where move_number = (select max(move_number) from moves)))
+)
+select line, string_agg(case when value != ' ' 
+                            then value
+                            else case when mod(line+col, 2) = 0 then '.' else ' ' end end, '' order by key) as chess
+  from cells_data
+ group by line
+ order by line desc
