@@ -9,7 +9,7 @@ head_id integer NOT NULL,	-- номер головы event_time timestamp NOT NU
 head_state boolean NOT NULL,	-- true - бодрствует, false - спит UNIQUE (head_id, event_time)
 );
 Запрос должен вывести интервалы (в пределах времени наблюдения), в которые все головы спали.
-<br>Пример
+<h2>Пример</h2>
 Для следующих входных данных
 INSERT INTO cerberus VALUES
 (1,	'2024-04-01	01:00:00'::timestamp,	false),	--	1-я	уснула
