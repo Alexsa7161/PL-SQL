@@ -1,0 +1,39 @@
+-- Решение основывается на подсчете одновременно спящих головах для нахождения интервалов
+-- изменения состояний голов (проснулась, уснула) по отдельности в уникальные моменты времени
+with heads as (
+  select event_time
+       , MAX(case when head_id=1 then head_state::int end) as head1_state
+       , MAX(case when head_id=2 then head_state::int end) as head2_state
+       , MAX(case when head_id=3 then head_state::int end) as head3_state
+    from cerberus
+   group by 1
+),
+-- количество неспящих голов в каждый момент времени
+heads_awake as (
+  select event_time
+       , first_value(head1_state) over (partition by h1_filling_states) -- заполняем пропуск значением сверху
+         + first_value(head2_state) over (partition by h2_filling_states)
+         + first_value(head3_state) over (partition by h3_filling_states) as heads_awake
+  -- подзапрос позволяет отслеживать состояние каждой головы во все моменты времени, а не только изменения
+  from (select *
+             , sum(case when head1_state is null then 0 else 1 end) over w as h1_filling_states
+             , sum(case when head2_state is null then 0 else 1 end) over w as h2_filling_states
+             , sum(case when head3_state is null then 0 else 1 end) over w as h3_filling_states
+          from heads
+        window w as (order by event_time)) as  null_forward_filling -- заполняем пропуски данных сверху вниз
+),
+intervals as (
+  select *
+       , case when heads_awake = 0 then 0
+              -- если до этого все головы спали, а сейчас нет, это конец интервала
+              else case when lag(heads_awake = 0) over () then 1 else null end 
+               end as all_sleep
+    from heads_awake
+)
+select min(event_time) as time_from
+     , max(event_time) as time_to
+  -- группы интервалов
+  from (select *, sum(all_sleep) over(order by event_time desc) as interval_id from intervals where all_sleep is not null) interval_groups
+ group by interval_id
+having min(event_time) != max(event_time)
+ order by 1;
