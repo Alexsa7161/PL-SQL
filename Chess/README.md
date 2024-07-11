@@ -41,7 +41,11 @@
 <br>line | chess
 <br>------+----------
 <br>8 | r.bqkb r
-<br>7 | pppp.Qpp 6 | .n. n . 5 | . . p . 4 | .B.P. . 3 | . . . .
+<br>7 | pppp.Qpp 
+<br>6 | .n. n . 
+<br>5 | . . p . 
+<br>4 | .B.P. . 
+<br>3 | . . . .
 <br>2 | PPPP PPP
 <br>1 | RNB K NR (8 rows)
 <br>Это соответствует следующей позиции:
