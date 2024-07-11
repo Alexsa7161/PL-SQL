@@ -1,0 +1,66 @@
+/* 
+Суть решения: 
+Первым шагом происходит создание трёх CTE-таблиц, 
+содержащих по два стобца времени - интервал сна для каждой из голов
+(с учётом интервала, у которого нет конечного времени);
+После происходит поиск пересечений интервалов сна у первой и второй головы; 
+Дальше - поиск пересечений интервалов сна из предыдущего шага с интервалами сна третьей головы;
+В конце необходимо убрать те интервалы, которые входят в другие 
+(возникает из-за записи состояний в промежуточный момент времени), более длительные интервалы.
+*/
+with sort_cerberus as (
+  select * from cerberus order by event_time
+), -- сортируем входные данные
+first_head_interval as (
+  select c.event_time as start_time, -- берём все времена начала интервалов сна у первой головы
+         coalesce(
+                  (select event_time from sort_cerberus 
+                  where event_time> c.event_time and head_id = 1 and head_state = true limit 1), --ближайшее время продуждения головы 1, которое позже времени засыпания
+                  (select max(event_time) from sort_cerberus)  -- если пробуждения не было - берем максимальное время из таблицы sort_cerberus
+                 ) as end_time 
+  from sort_cerberus c 
+  where head_id = 1 and head_state = false -- event_time - время засыпания (или подтверждения состояния сна) для 1 головы
+), 
+second_head_interval as (
+  select c.event_time as start_time, 
+         coalesce(
+                  (select event_time from sort_cerberus 
+                  where event_time> c.event_time and head_id = 2 and head_state = true limit 1),
+                  (select max(event_time) from sort_cerberus)
+                 ) as end_time
+  from sort_cerberus c 
+  where head_id = 2 and head_state = false
+),
+third_head_interval as (
+  select c.event_time as start_time, 
+         coalesce(
+                  (select event_time from sort_cerberus 
+                  where event_time> c.event_time and head_id = 3 and head_state = true limit 1),
+                  (select max(event_time) from sort_cerberus)
+                 ) as end_time
+  from sort_cerberus c 
+  where head_id = 3 and head_state = false
+),
+intersect_1_2 as (
+  select distinct greatest(hi1.start_time, hi2.start_time) as start_time, -- наибольшее время начала среди двух интервалов
+                  least(hi1.end_time, hi2.end_time) AS end_time -- наименьшее время окончания среди двух интервалов
+  from first_head_interval hi1 join second_head_interval hi2 
+                               on hi1.start_time <= hi2.end_time and hi2.start_time <= hi1.end_time -- условие пересечения интервалов
+), 
+intersect_1_2_3 as (
+  select distinct greatest(hi1_2.start_time, hi3.start_time) as intersection_start,
+                  least(hi1_2.end_time, hi3.end_time) as intersection_end
+  from  intersect_1_2 hi1_2 join third_head_interval hi3 
+                            on hi1_2.start_time <= hi3.end_time and hi1_2.end_time >= hi3.start_time
+)
+select distinct intersection_start as time_from, -- берём уникальные интервалы
+                intersection_end as time_to 
+from intersect_1_2_3 as intrsct1
+where intrsct1.intersection_start != intrsct1.intersection_end and -- условие, если интервал начался в последний записанный момент времени таблицы cerberus
+      not exists   -- не содержит интервалов, полностью входящих в другие интервалы
+      (  
+        select intrsct2.intersection_start, intrsct2.intersection_end
+        from intersect_1_2_3 as intrsct2
+        where (intrsct1.intersection_start > intrsct2.intersection_start and -- первый интервал начался позже (одинакового времени начала быть не может)
+               intrsct1.intersection_end <= intrsct2.intersection_end) -- первый интервал закончился раньше или в то же время
+      );
