@@ -1,0 +1,158 @@
+/* 
+Суть решения: 
+В первую очередь создаётся таблица, содержащая два столбца -
+координаты ячейки и фигура (начальная конфигурация);
+Далее ходы форматируются под вид откуда фигура ходит | куда фигура ходит | что за фигура ходит; 
+После этого выбираются ячейки, откуда ходили фигуры - в начальной конфигурации они затираются точками или пробелами;
+В конце, берутся ячейки, куда ходили фигуры - только их последние ходы для каждой ячейки, -
+и происходит заполнение таблицы из прошлого шага. 
+В результате остаются ячейки, пустые для тех ячеек, откуда уходила фигура, заполненные для тех 
+ячеек, где фигура никуда не ходила (начальная конфигурация), или последняя фигура, посетившая 
+ячейку.
+*/
+WITH init_conf AS ( SELECT 'RNBQKBNR' AS white_figures, -- заполняем начальную конфигурацию фигур
+                           'PPPPPPPP' AS white_pawns,
+                           'rnbqkbnr' AS black_figures,
+                           'pppppppp' AS black_pawns
+),
+coordinates AS ( SELECT chr(ascii('a') - 1 + col) || row::text AS cell, -- берём все координаты возможных ячеек
+                                                                  row,
+                                                                  col
+                 FROM generate_series(1, 8) AS row
+                 CROSS JOIN generate_series(1, 8) AS col
+),
+board as (SELECT cell, -- заполняем таблицу значениями: координаты ячейки|фигура
+                 CASE 
+                  WHEN row = 1 THEN substr(white_figures, col, 1)
+                  WHEN row = 2 THEN substr(white_pawns, col, 1)
+                  WHEN row = 7 THEN substr(black_pawns, col, 1)
+                  WHEN row = 8 THEN substr(black_figures, col, 1)
+                  WHEN (col+row)%2 = 0 then '.'
+                  else ' '
+                 END AS figure
+          FROM coordinates, init_conf
+),
+input AS (SELECT current_setting('chess.game') AS moves_string --входные данные
+),
+split_moves AS ( -- разбитие на ходы
+    SELECT unnest
+           (
+             string_to_array
+             (
+              regexp_replace
+              (
+                regexp_replace
+                  (
+                    moves_string,'|#|x|(\+)','','g' -- удаление обозначений шаха, мата и побития
+                  )
+                , '(\s)?\d+\.(\s)?', ' ', 'g' -- удаление номеров ходов
+              ) 
+              , ' '
+             )
+           ) AS move
+    FROM input
+), 
+player_moves as (select move, -- разбитие ходов по игрокам
+                     case 
+                      when row_number() over() %2 = 0 
+                      then 2 
+                      else 1 
+                     end as gamer
+from split_moves where move != ''),
+splitted_moves as (select gamer, -- приведение особых ситуаций (превращение пешки и рокировка) к виду обычных ходов
+                          case 
+                            when move = 'O-O' 
+                            then case 
+                                  when gamer = 1 then  'Rh1f1 Ke1g1'
+                                  when gamer = 2 then  'Rh8f8 Ke8g8'
+                                 end
+                            when move = 'O-O-O'
+                            then case 
+                                   when gamer = 1 then  'Ra1d1 Ke1c1'
+                                   when gamer = 2 then  'Ra8d8 Ke8c8'
+                                 end
+                            when substring(move,length(move),1) similar to '[BRQNP]' -- превращение в конкретную фигуру
+                            then substring(move,length(move),1)||substring(move,1,length(move)-1) --букву фигуры в начало
+                            when substring(move from 1 for 1) not similar to '[BRQNK]' and -- превращение по умолчанию (ферзь)
+                            substring(move,length(move),1) not similar to '[BRQNP]'
+                            and  substring(move,length(move),1) in ('1','8')
+                            then 'Q'||move
+                            else move end as move 
+                   from player_moves
+),
+non_spaces_moves as (select gamer,
+                     UNNEST
+                     (
+                      STRING_TO_ARRAY(move,' ') -- очищаем пробелы специальных ходов
+                     ) as move from splitted_moves
+),
+parsed_moves AS (select gamer,  -- приведение к виду игрок|откуда|куда|фигура
+                        case 
+                          when substring(move from 1 for 1) SIMILAR to '[BRQNK]'
+                          then substring(move from 2 for 2)
+                          else substring(move from 1 for 2) end AS from_cell,
+                        case 
+                          when substring(move from 1 for 1) SIMILAR to '[BRQNK]' 
+                          then substring(move from 4 for 2)
+                          else substring(move from 3 for 2) end AS to_cell,
+                        case 
+                        when substring(move from 1 for 1) SIMILAR to '[BRQNK]' 
+                        then substring(move from 1 for 1)
+                        else 'P' end as piece, -- если нет названия фигуры - пешка
+                        row_number() over() as rn
+                 from non_spaces_moves
+),
+lower_moves as (select from_cell, -- перевод в нижний регистр ходов игрока чёрных
+                       to_cell,
+                       case 
+                        when gamer = 1 
+                        then piece 
+                        else LOWER(piece) end as piece,
+                       rn from parsed_moves
+),
+emptying_end_moves as (select from_cell,
+                  case 
+                    when to_cell in (select from_cell  -- обнуление тех конечных позиций ходов, с которых в будущем был сделан ход
+                                       from lower_moves lm2 
+                                       where lm2.rn > lm1.rn
+                                      ) 
+                    then '-' 
+                    else to_cell end as to_cell,
+                  piece,
+                  rn 
+           from lower_moves lm1),
+all_from_moves as (select distinct from_cell 
+                   from emptying_end_moves
+),
+all_to_moves as (select distinct to_cell,
+                                 piece 
+                 from emptying_end_moves r1 
+                 where rn = (select max(rn) -- берём только последний ход, фигура в котором занимает конкретную позицию
+                             from emptying_end_moves r2 
+                             where r1.to_cell = r2.to_cell  
+                             group by to_cell
+                            )
+),
+mash_from_cells as (select cell,
+                case 
+                  when from_cell is not null -- не берём пустые ячейки, образованные из-за right join
+                  then case -- затираем ячейки, откуда ходили фигуры
+                        when (ascii(SUBSTRING(from_cell,1,1)) - ascii('a') + 1 +SUBSTRING(from_cell,2,1)::int)%2=0 
+                        then '.' 
+                        else ' ' end 
+                  else figure end as figure1 
+         from all_from_moves right join board on from_cell = cell
+),
+mash_to_cells as (select cell,
+                case 
+                  when to_cell is not null 
+                  then piece -- устанавливаем фигуры в ячейки для конечных ходов
+                  else figure1 end as figure  
+         from all_to_moves right join mash_from_cells on to_cell = cell
+),
+agg_to_line as (select string_agg(figure,'' order by SUBSTRING(cell,1,1)) as chess, -- агрегируем фигуры в линию
+                       SUBSTRING(cell,2,1)::int as val 
+         from mash_to_cells
+         group by SUBSTRING(cell,2,1)
+)
+select val as line, chess from agg_to_line order by val desc;
